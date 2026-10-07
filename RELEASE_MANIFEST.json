@@ -791,8 +791,8 @@
     },
     {
       "path": "web/src/collection-import-page.test.tsx",
-      "bytes": 144677,
-      "sha256": "1f8f5e1d3600330e5ff5eac752ebc13717d48bdd2bdbd15986ea28ec51d06beb"
+      "bytes": 144846,
+      "sha256": "edd3eee97ed572cb0b0e8872224e84a1275ad340e3c39636996abe8a709d17e6"
     },
     {
       "path": "web/src/collection-import-page.tsx",

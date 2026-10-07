@@ -447,16 +447,19 @@ describe("R2.6-B1 批量导入创建、恢复与 preview 壳", () => {
   });
 
   it("active 204 后展示两个独立输入，并在提交前说明字符与 UTF-8 边界", async () => {
-    renderPage();
+    const { container } = renderPage();
+    const page = within(container);
 
-    const inputs = await screen.findAllByRole("textbox", { name: /完整分享文本/ });
+    // Wait for this render's create state before querying accessible inputs.
+    await page.findByText(/2 至 10 条完整分享文本/);
+    const inputs = page.getAllByRole("textbox", { name: /完整分享文本/ });
     expect(inputs).toHaveLength(2);
-    expect(screen.getByText(/2 至 10 条完整分享文本/)).toBeInTheDocument();
-    expect(screen.getByText(/65,536 UTF-8 bytes/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "创建批次并开始检查" })).toBeDisabled();
+    expect(page.getByText(/2 至 10 条完整分享文本/)).toBeInTheDocument();
+    expect(page.getByText(/65,536 UTF-8 bytes/)).toBeInTheDocument();
+    expect(page.getByRole("button", { name: "创建批次并开始检查" })).toBeDisabled();
 
     fireEvent.change(inputs[0], { target: { value: "😀" } });
-    expect(screen.getByText("1/10,000 字符")).toBeInTheDocument();
+    expect(page.getByText("1/10,000 字符")).toBeInTheDocument();
   });
 
   it("完整保留原序文本；未知结果先 GET active，再以同一个幂等键对账", async () => {
