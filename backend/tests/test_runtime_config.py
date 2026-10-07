@@ -248,13 +248,29 @@ class RuntimeConfigContractTests(unittest.TestCase):
             if isinstance(report_or_text, str)
             else json.dumps(report_or_text, ensure_ascii=False, sort_keys=True)
         )
-        folded = text.casefold()
         self.assertNotRegex(text, r"https?://")
         self.assertNotRegex(
             text,
             r"(?i)traceback|authorization|bearer|cookie|password|private-value",
         )
         self.assertNotRegex(text, r"(?i)[a-z]:[\\/]")
+        folded = text.casefold()
+        try:
+            report = json.loads(text)
+        except json.JSONDecodeError:
+            # CLI help/combined outputs keep the original full-text guard.
+            pass
+        else:
+            # Versions are explicitly public metadata. Check their trusted
+            # values before excluding just these leaves from input searches.
+            self.assertEqual(report["runtime"]["python"], platform.python_version())
+            self.assertEqual(report["runtime"]["sqlite"], sqlite3.sqlite_version)
+            runtime_without_versions = {
+                key: value for key, value in report["runtime"].items()
+                if key not in {"python", "sqlite"}
+            }
+            redacted_fields = {**report, "runtime": runtime_without_versions}
+            folded = json.dumps(redacted_fields, ensure_ascii=False, sort_keys=True).casefold()
         for private_value in (PROJECT_ROOT, Path.home(), *secret_values):
             if private_value is None:
                 continue
@@ -400,6 +416,54 @@ class RuntimeConfigContractTests(unittest.TestCase):
         for field, value in invalid_cases:
             with self.subTest(field=field, value=value):
                 self.assert_invalid_field({field: value}, field)
+
+    def test_numeric_redaction_allows_trusted_runtime_version_collisions(self):
+        """Public version digits are not echoes of rejected numeric input."""
+        with (
+            patch.object(runtime_config.platform, "python_version", return_value="3.12.10"),
+            patch.object(runtime_config.sqlite3, "sqlite_version", "3.40.0"),
+        ):
+            self.assert_invalid_field({"VIDEO_MAX_UPLOAD_BYTES": "0"}, "VIDEO_MAX_UPLOAD_BYTES")
+            with _temporary_project() as project:
+                report = inspect_runtime_config({"VIDEO_MAX_UPLOAD_BYTES": "0"}, project)
+                self.assert_report_redacted(json.dumps(report), "0", project)
+
+    def test_redaction_guard_rejects_raw_values_outside_runtime_versions(self):
+        """A public version collision must not exempt any other report field."""
+        with _temporary_project() as project:
+            report = inspect_runtime_config({"VIDEO_MAX_UPLOAD_BYTES": "0"}, project)
+            for value in ("0", "sample-confidential-note"):
+                for location in ("config", "issue", "extra"):
+                    with self.subTest(value=value, location=location):
+                        leaked = json.loads(json.dumps(report))
+                        if location == "config":
+                            leaked["config"]["VIDEO_MAX_UPLOAD_BYTES"] = value
+                        elif location == "issue":
+                            leaked["issues"][0]["field"] = value
+                        else:
+                            leaked["raw_value"] = value
+                        for payload in (leaked, json.dumps(leaked)):
+                            with self.assertRaises(AssertionError):
+                                self.assert_report_redacted(payload, value, project)
+
+    def test_redaction_guard_rejects_untrusted_runtime_version_values(self):
+        """Only exact public runtime versions can be excluded from value search."""
+        with _temporary_project() as project:
+            report = inspect_runtime_config({"VIDEO_MAX_UPLOAD_BYTES": "0"}, project)
+            for key in ("python", "sqlite"):
+                with self.subTest(key=key):
+                    leaked = json.loads(json.dumps(report))
+                    leaked["runtime"][key] = "sample-confidential-note"
+                    for payload in (leaked, json.dumps(leaked)):
+                        with self.assertRaises(AssertionError):
+                            self.assert_report_redacted(payload, "sample-confidential-note", project)
+
+    def test_redaction_guard_preserves_non_json_cli_output_checks(self):
+        self.assert_report_redacted("usage: offline configuration check", "sample-confidential-note")
+        for value in ("0", "sample-confidential-note"):
+            with self.subTest(value=value):
+                with self.assertRaises(AssertionError):
+                    self.assert_report_redacted(f"usage: echoed {value}", value)
 
     def test_relative_paths_anchor_to_project_and_missing_roots_only_warn(self):
         """RR1-CONFIG-PATH-001: resolution is cwd-independent and read-only."""

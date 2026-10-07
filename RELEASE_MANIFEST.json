@@ -536,8 +536,8 @@
     },
     {
       "path": "backend/tests/test_runtime_config.py",
-      "bytes": 74804,
-      "sha256": "de685bc473c8cb6b4f49f1470534e56dbac0699f319de1112a31f2dd01a237ce"
+      "bytes": 78600,
+      "sha256": "0de7d3397a2076f98f39954164e39591ecfff83fdb2b98f01d8e22c69dd48804"
     },
     {
       "path": "backend/tests/test_runtime_dependencies.py",
