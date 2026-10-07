@@ -426,8 +426,8 @@
     },
     {
       "path": "backend/tests/test_cover_cache.py",
-      "bytes": 65119,
-      "sha256": "d21dc586900c5a4b639a4b46304926d6fc6f505cc12ac24df043d5a317d4f5e6"
+      "bytes": 70808,
+      "sha256": "81bdd09884190c73edcc64105172ce5b678fee4f71b5fe3ae57e447673c2ed48"
     },
     {
       "path": "backend/tests/test_douyin_metadata_regressions.py",

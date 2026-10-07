@@ -155,6 +155,16 @@ class _MutableClock:
         self.value += seconds
 
 
+def _colliding_cover_urls() -> tuple[str, str]:
+    first_url = "https://cdn.example/stripe-0.png"
+    prefix = hashlib.sha256(first_url.encode("utf-8")).hexdigest()[:3]
+    for index in range(1, 100_000):
+        candidate = f"https://cdn.example/stripe-{index}.png"
+        if hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:3] == prefix:
+            return first_url, candidate
+    raise AssertionError("failed to construct a deterministic stripe collision")
+
+
 class _SequenceImageFetcher:
     def __init__(
         self,
@@ -709,48 +719,130 @@ class CoverCacheServiceTests(unittest.TestCase):
 
     def test_different_cold_keys_sharing_a_lock_stripe_both_complete(self):
         root = self.base / "stripe-collision-cache"
-        first_url = "https://cdn.example/stripe-0.png"
-        prefix = hashlib.sha256(first_url.encode("utf-8")).hexdigest()[:3]
-        second_url = ""
-        for index in range(1, 100_000):
-            candidate = f"https://cdn.example/stripe-{index}.png"
-            if hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:3] == prefix:
-                second_url = candidate
-                break
-        self.assertTrue(second_url, "failed to construct a deterministic stripe collision")
+        first_url, second_url = _colliding_cover_urls()
 
         started = threading.Event()
         release = threading.Event()
+        waiter_entered_lock_wait = threading.Event()
+        owner_entered_commit = threading.Event()
+        release_commit = threading.Event()
+
+        class _GatedCommitService(CoverCacheService):
+            def _commit(self, key: str, *args, **kwargs):
+                owner_entered_commit.set()
+                if not release_commit.wait(timeout=5):
+                    raise AssertionError("stripe owner commit was not released")
+                return super()._commit(key, *args, **kwargs)
+
+        class _SignalingWaiterService(CoverCacheService):
+            def _acquire_process_lock(self, key: str, *, wait_seconds: float):
+                if wait_seconds > 0:
+                    waiter_entered_lock_wait.set()
+                return super()._acquire_process_lock(key, wait_seconds=wait_seconds)
+
         first_body = _png(color=(1, 3, 5))
         second_body = _png(color=(2, 4, 6))
-        first_service = CoverCacheService(
-            root,
-            fetcher=_SequenceImageFetcher(
-                (first_body, "image/png"), started=started, release=release
-            ),
-            wait_seconds=0.05,
-            lease_seconds=0.5,
+        first_fetcher = _SequenceImageFetcher(
+            (first_body, "image/png"), started=started, release=release
         )
+        first_service = _GatedCommitService(root, fetcher=first_fetcher)
         second_fetcher = _SequenceImageFetcher((second_body, "image/png"))
-        second_service = CoverCacheService(
-            root,
-            fetcher=second_fetcher,
-            wait_seconds=0.05,
-            lease_seconds=0.5,
-        )
+        # The success case uses the production bounded lease window. Fetch
+        # release alone cannot promise that validation, fsync, commit and
+        # cleanup have finished within the old 0.5-second fixture window.
+        second_service = _SignalingWaiterService(root, fetcher=second_fetcher)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            first_future = pool.submit(first_service.get, first_url)
-            self.assertTrue(started.wait(timeout=2), "first stripe owner did not start")
-            second_future = pool.submit(second_service.get, second_url)
-            time.sleep(0.1)
-            release.set()
-            first = first_future.result(timeout=5)
-            second = second_future.result(timeout=5)
+            try:
+                first_future = pool.submit(first_service.get, first_url)
+                self.assertTrue(started.wait(timeout=5), "first stripe owner did not start")
+                second_future = pool.submit(second_service.get, second_url)
+                self.assertTrue(
+                    waiter_entered_lock_wait.wait(timeout=5),
+                    "colliding cold key did not enter the real lock wait",
+                )
+                self.assertFalse(second_future.done())
+                release.set()
+                self.assertTrue(
+                    owner_entered_commit.wait(timeout=5),
+                    "first stripe owner did not enter commit",
+                )
+                self.assertFalse(first_future.done())
+                self.assertFalse(second_future.done())
+                self.assertEqual(second_fetcher.calls, [])
+                release_commit.set()
+                first = first_future.result(timeout=10)
+                second = second_future.result(timeout=10)
+            finally:
+                release.set()
+                release_commit.set()
 
         self.assertEqual(first.body, first_body)
         self.assertEqual(second.body, second_body)
+        self.assertEqual(first_fetcher.calls, [first_url])
         self.assertEqual(second_fetcher.calls, [second_url])
+        self.assertEqual(list(root.glob("*.part")), [])
+
+    def test_colliding_cold_key_wait_exhaustion_is_safe_and_can_recover(self):
+        root = self.base / "stripe-wait-exhaustion-cache"
+        first_url, second_url = _colliding_cover_urls()
+        owner_entered_commit = threading.Event()
+        release_commit = threading.Event()
+        waiter_entered_lock_wait = threading.Event()
+
+        class _GatedCommitService(CoverCacheService):
+            def _commit(self, key: str, *args, **kwargs):
+                owner_entered_commit.set()
+                if not release_commit.wait(timeout=5):
+                    raise AssertionError("stripe owner commit was not released")
+                return super()._commit(key, *args, **kwargs)
+
+        class _SignalingWaiterService(CoverCacheService):
+            def _acquire_process_lock(self, key: str, *, wait_seconds: float):
+                if wait_seconds > 0:
+                    waiter_entered_lock_wait.set()
+                return super()._acquire_process_lock(key, wait_seconds=wait_seconds)
+
+        first_body = _png(color=(1, 3, 5))
+        second_body = _png(color=(2, 4, 6))
+        first_fetcher = _SequenceImageFetcher((first_body, "image/png"))
+        first_service = _GatedCommitService(root, fetcher=first_fetcher)
+        second_fetcher = _SequenceImageFetcher((second_body, "image/png"))
+        second_service = _SignalingWaiterService(
+            root,
+            fetcher=second_fetcher,
+            wait_seconds=0.05,
+            lease_seconds=0.1,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                first_future = pool.submit(first_service.get, first_url)
+                self.assertTrue(owner_entered_commit.wait(timeout=5))
+                second_future = pool.submit(second_service.get, second_url)
+                self.assertTrue(waiter_entered_lock_wait.wait(timeout=5))
+                # Keep the actual owner lock held until the bounded waiter
+                # returns. No sleep guesses at the exhaustion boundary.
+                with self.assertRaises(CoverUnavailable) as caught:
+                    second_future.result(timeout=5)
+                self.assertEqual(str(caught.exception), "")
+                self.assertFalse(first_future.done())
+                self.assertEqual(second_fetcher.calls, [])
+                second_key = second_service.cache_key(second_url)
+                self.assertFalse((root / f"{second_key}.json").exists())
+                self.assertEqual(list(root.glob(f"{second_key}.*.img")), [])
+                self.assertFalse((root / f"{second_key}.failure").exists())
+            finally:
+                release_commit.set()
+            first = first_future.result(timeout=10)
+
+        recovered = second_service.get(second_url)
+        self.assertEqual(first.body, first_body)
+        self.assertEqual(recovered.body, second_body)
+        self.assertEqual(recovered.cache_status, "MISS")
+        self.assertEqual(first_fetcher.calls, [first_url])
+        self.assertEqual(second_fetcher.calls, [second_url])
+        self.assertEqual(list(root.glob("*.part")), [])
 
     def test_concurrent_first_initialization_is_create_or_wait_safe(self):
         root = self.base / "concurrent-initialization-cache"
@@ -1230,7 +1322,7 @@ class CoverCacheServiceTests(unittest.TestCase):
     def test_cleanup_budget_converges_across_more_than_ten_thousand_managed_files(self):
         root = self.base / "large-managed-cache"
         budget = 256
-        clock = _MutableClock(time.time() + 120)
+        clock = _MutableClock()
         service = CoverCacheService(
             root,
             fetcher=_SequenceImageFetcher(),
@@ -1256,7 +1348,9 @@ class CoverCacheServiceTests(unittest.TestCase):
         managed_count = 10_032
         last_managed = root / f"{managed_count - 1:064x}.failure"
         for index in range(managed_count):
-            (root / f"{index:064x}.failure").write_bytes(failure_payload)
+            failure = root / f"{index:064x}.failure"
+            failure.write_bytes(failure_payload)
+            os.utime(failure, (clock.value - 120, clock.value - 120))
 
         unknown = root / "user-owned.bin"
         unknown_body = b"preserve unknown bytes" * 32
@@ -1314,7 +1408,7 @@ class CoverCacheServiceTests(unittest.TestCase):
         # Capacity cleanup must first evict content + manifest as one logical
         # unit, then reclaim the orphan stale marker on a later cycle.
         coupled_root = self.base / "capacity-stale-coupling-cache"
-        coupled_clock = _MutableClock(time.time())
+        coupled_clock = _MutableClock()
         budget_service = CoverCacheService(
             coupled_root,
             fetcher=_SequenceImageFetcher(),
@@ -1339,6 +1433,14 @@ class CoverCacheServiceTests(unittest.TestCase):
         content = coupled_root / content_name
         stale = coupled_root / f"{key}.stale"
 
+        # Model slow initialization/writes explicitly, then align cleanup's
+        # business clock with those controlled file mtimes. A clock captured
+        # before seed construction plus real filesystem mtimes is not a
+        # reliable protection-period fixture on a busy runner.
+        written_at = coupled_clock.value + 5
+        for path in (content, manifest, stale):
+            os.utime(path, (written_at, written_at))
+        coupled_clock.value = written_at
         budget_service.cleanup()
 
         self.assertFalse(content.exists())
@@ -1348,7 +1450,13 @@ class CoverCacheServiceTests(unittest.TestCase):
             "capacity cleanup deleted a live stale generation in the asset eviction cycle",
         )
 
-        coupled_clock.advance(3)
+        budget_service.cleanup()
+        self.assertTrue(stale.is_file(), "young orphan stale marker lost its protection")
+        coupled_clock.advance(budget_service.lease_seconds * 2)
+        budget_service.cleanup()
+        self.assertTrue(stale.is_file(), "stale protection must include its exact boundary")
+
+        coupled_clock.advance(1)
         budget_service.cleanup()
 
         self.assertFalse(stale.exists())
