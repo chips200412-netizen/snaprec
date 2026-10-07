@@ -1,0 +1,47 @@
+name: Alpha checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-alpha:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install pinned Python dependencies
+        run: python -m pip install -r requirements.lock
+      - name: Check public source snapshot
+        run: python scripts/export_release.py --check
+      - name: Backend and release tests
+        run: python -m pytest backend/tests scripts/tests/test_export_release.py -q
+      - name: Offline fresh-library smoke
+        run: python scripts/smoke_release.py
+      - name: Install pinned frontend dependencies
+        working-directory: web
+        run: |
+          npm install --global pnpm@11.19.0
+          pnpm install --frozen-lockfile
+      - name: Frontend tests
+        working-directory: web
+        run: pnpm test
+      - name: Frontend build
+        working-directory: web
+        run: pnpm build

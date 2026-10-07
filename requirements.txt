@@ -1,0 +1,10 @@
+pydantic>=2.8,<3
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.9,<1
+idna>=3,<4
+justhtml==3.11.1
+pillow>=12.3,<13
+pytest>=8,<9
+httpx>=0.27,<1
+playwright>=1.58,<2

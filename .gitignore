@@ -1,0 +1,67 @@
+# Environment and credentials
+/API.txt
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*cookie*
+*token*
+*credential*
+*secret*
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# JavaScript and build output
+node_modules/
+.pnpm-store/
+.vite/
+web/dist/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Runtime databases, caches, logs, and user data
+var/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.log
+*.out.log
+*.err.log
+
+# Uploaded, generated, and temporary media
+uploads/
+tmp/
+temp/
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.part
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.wanan/
